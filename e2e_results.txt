@@ -1,0 +1,38 @@
+== BionicPRO спринт 9: сквозной прогон (2026-11-09, docker compose, 15 сервисов) ==
+
+0) Токен: OAuth2 (для e2e — password grant сервисного пользователя e2e-test;
+   в браузере пользователь проходит PKCE + OTP). access TTL = 120 c, refresh есть.
+   sub = fc9c230b-ddcd-4d71-a965-5c8964a508b4 (позже удалён из realm, realm чист).
+
+1) GET /reports (свой отчёт, период 2026-01-01..2026-01-07):
+   {"report_url":"http://localhost:8090/reports-cdn/user=fc9c230b-.../2026-01-01_2026-01-07.json"}
+
+2) Скачивание через CDN: HTTP 200, X-Cache-Status: EXPIRED (первый) -> HIT (повтор).
+
+3) Отчёт с данными (новый период 2026-01-02..2026-01-06, из S3 через CDN):
+   {"period":{"from":"2026-01-02","to":"2026-01-06"},"rows":[
+     {"date":"2026-01-02","prosthesis_id":"prosthesis-e2e","events":15,"avg_response_ms":67.7},
+     {"date":"2026-01-03","prosthesis_id":"prosthesis-e2e","events":15,"avg_response_ms":66.5},
+     {"date":"2026-01-04","prosthesis_id":"prosthesis-e2e","events":15,"avg_response_ms":70.1}, ...]}
+   Повторный запрос: X-Cache-Status: HIT (раздача из кеша nginx, без S3/ClickHouse).
+
+4) Повторный GET /reports — тот же report_url из S3 (без обращения к ClickHouse).
+
+5) Чужой sub (sub-prothetic1 под своим токеном): HTTP 403 — доступ только к своему отчёту.
+
+6) Без токена: HTTP 401.
+
+7) Необработанный период (2026-02-01..2026-02-07):
+   202 Accepted: "data for requested period is not processed yet; last processed day: 2026-01-07".
+
+8) CDC (Debezium): UPDATE clients в CRM (PostgreSQL) -> топик crm.public.clients ->
+   KafkaEngine (JSONAsString) -> MV (JSONExtract) -> реплика crm_clients в ClickHouse:
+   sub-prothetic1 = "Prothetic One (updated)", sub-prothetic2 = "Prothetic Two (updated)".
+
+9) Телеметрия: producer -> топик telemetry.prosthesis -> KafkaEngine -> MV ->
+   telemetry_raw = 385 событий; витрина reports_user_daily = 28 строк (3 пользователя + e2e).
+
+10) Airflow: DAG reports_user_daily_etl загружен (расписание 0 3 * * *), UI :8081.
+
+11) Garage S3 (замена MinIO, удалённого из Docker Hub в сент. 2026): бакет reports,
+    ключ GK78bf849c...; объекты user=<sub>/<from>_<to>.json.

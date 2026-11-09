@@ -1,23 +1,15 @@
 import React from 'react';
-import { ReactKeycloakProvider } from '@react-keycloak/web';
-import Keycloak, { KeycloakConfig } from 'keycloak-js';
 import ReportPage from './components/ReportPage';
 
-const keycloakConfig: KeycloakConfig = {
-  url: process.env.REACT_APP_KEYCLOAK_URL,
-  realm: process.env.REACT_APP_KEYCLOAK_REALM||"",
-  clientId: process.env.REACT_APP_KEYCLOAK_CLIENT_ID||""
-};
-
-const keycloak = new Keycloak(keycloakConfig);
-
+// Задание 1, задача 3 (п.10): фронтенд больше не работает с Keycloak напрямую
+// и не получает токены. Вся аутентификация — через бэкенд bionicpro-auth
+// (сессионная cookie HttpOnly/Secure): ReactKeycloakProvider и keycloak-js
+// удалены из приложения.
 const App: React.FC = () => {
   return (
-    <ReactKeycloakProvider authClient={keycloak}>
-      <div className="App">
-        <ReportPage />
-      </div>
-    </ReactKeycloakProvider>
+    <div className="App">
+      <ReportPage />
+    </div>
   );
 };
 
