@@ -1,0 +1,24 @@
+# Garage S3: замена MinIO (образ удалён из Docker Hub, сентябрь 2026).
+# Совместим с S3 API: reports-api и Nginx-CDN работают без изменений.
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "lmdb"
+replication_mode = "none"
+rpc_bind_addr = "[::]:3910"
+rpc_public_addr = "minio:3910"
+rpc_secret = "ed612f5f95f17424234ae161be5fb17cf804c25624f4282e058f28dc59a3c926"
+
+[s3_api]
+s3_region = "garage"
+api_bind_addr = "[::]:3900"
+root_domain = ".s3.garage"
+
+[s3_web]
+bind_addr = "[::]:3902"
+root_domain = ".web.garage"
+index = "index.html"
+
+[admin]
+api_bind_addr = "[::]:3901"
+admin_token = "bionicpro-admin-token"
+metrics_token = "bionicpro-metrics-token"
