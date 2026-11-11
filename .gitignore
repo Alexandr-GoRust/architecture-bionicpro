@@ -8,3 +8,4 @@ __pycache__/
 bionicpro-auth/bionicpro-auth
 reports-api/reports-api
 .sources/
+.idea/
