@@ -58,7 +58,8 @@ services:
     build:
       context: ./bionicpro-auth
     environment:
-      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_URL: http://keycloak:8080            # сервер-сервер: discovery, token, refresh
+      KEYCLOAK_PUBLIC_URL: http://localhost:8080    # для БРАУЗЕРА (AuthCodeURL/logout), резолвится с хоста
       KEYCLOAK_REALM: reports-realm
       AUTH_CLIENT_ID: bionicpro-auth
       AUTH_CLIENT_SECRET: bionicpro-auth-secret
@@ -79,8 +80,7 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3000:3000"
-    environment:
-      REACT_APP_AUTH_URL: http://localhost:8000
+    environment: {}
     depends_on:
       - bionicpro-auth
     networks: [bionicpro]
@@ -104,9 +104,12 @@ services:
     ports:
       - "8001:8001"
     depends_on:
-      - keycloak
-      - clickhouse
-      - minio
+      keycloak:
+        condition: service_started
+      clickhouse:
+        condition: service_started
+      garage-init:
+        condition: service_completed_successfully
     networks: [bionicpro]
 
   clickhouse:
@@ -210,10 +213,18 @@ services:
       AIRFLOW__WEBSERVER__SECRET_KEY: bionicpro-airflow
       AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
       CH_HOST: clickhouse
+      CH_USER: reports_api
+      CH_PASSWORD: reports_api_pass
       _AIRFLOW_WWW_USER_CREATE: "true"
       _AIRFLOW_WWW_USER_USERNAME: admin
       _AIRFLOW_WWW_USER_PASSWORD: admin
-    command: standalone
+    command:
+      - bash
+      - -c
+      - |
+        airflow db migrate && \
+        (airflow users create -u admin -p admin -f Admin -l User -r Admin -e admin@bionicpro.local || true) && \
+        exec airflow standalone
     volumes:
       - ./airflow/dags:/opt/airflow/dags
     ports:
@@ -257,6 +268,39 @@ services:
       - "8090:8090"
     depends_on:
       - minio
+    networks: [bionicpro]
+
+  # Автоинициализация Garage при первом старте: layout, бакет reports,
+  # фиксированные ключи reports-api (см. garage/init_garage.py).
+  # Без этого чистый запуск оставляет S3 без бакета/ключей.
+  garage-init:
+    image: python:3.11-alpine
+    command: ["python", "/init_garage.py"]
+    volumes:
+      - ./garage/init_garage.py:/init_garage.py:ro
+    environment:
+      GARAGE_ADMIN_URL: http://minio:3901
+      GARAGE_ADMIN_TOKEN: bionicpro-admin-token
+      GARAGE_S3_ACCESS_KEY: GK78bf849c1a6aafddb379b319
+      GARAGE_S3_SECRET_KEY: 06d9927e8ba8a9de154aed817e42040a9d2ef225110ddd3be8967706357ce625
+      GARAGE_BUCKET: reports
+    depends_on:
+      - minio
+    restart: "no"
+    networks: [bionicpro]
+
+  # Телеметрия чипов протезов (7 дней × 40 событий) — чтобы витрина
+  # и отчёты были не пустыми сразу после `docker compose up`.
+  telemetry-seed:
+    image: python:3.11-slim
+    volumes:
+      - ./telemetry-producer.py:/telemetry-producer.py:ro
+    command: sh -c "pip install --no-cache-dir -q kafka-python && python /telemetry-producer.py 7 40"
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+    depends_on:
+      - kafka
+    restart: "no"
     networks: [bionicpro]
 
 volumes:

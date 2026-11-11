@@ -12,6 +12,7 @@ ClickHouse выполняется напрямую через clickhouse-driver 
 функционально эквивалентно ClickHouseOperator.
 """
 from datetime import datetime, timedelta
+import os
 
 import clickhouse_driver
 import psycopg2
@@ -20,6 +21,8 @@ from airflow.operators.python import PythonOperator
 
 CH_HOST = "clickhouse"
 CH_DB = "reports"
+CH_USER = os.environ.get("CH_USER", "reports_api")
+CH_PASSWORD = os.environ.get("CH_PASSWORD", "reports_api_pass")
 CRM_DSN = "host=crm_db port=5432 dbname=crm user=crm_user password=crm_password"
 
 DDL = [
@@ -69,7 +72,10 @@ DDL = [
 
 
 def ch():
-    return clickhouse_driver.Client(host=CH_HOST, database=CH_DB)
+    # отдельный сервисный юзер reports_api (см. clickhouse/init/01-init.sql):
+    # у default из docker-сети аутентификация не проходит
+    return clickhouse_driver.Client(host=CH_HOST, database=CH_DB,
+                                    user=CH_USER, password=CH_PASSWORD)
 
 
 def create_tables(**_):
@@ -95,7 +101,15 @@ def load_telemetry(**_):
 
 
 def build_datamart(**_):
-    """Transform+Load: витрина за вчерашний день = телеметрия JOIN клиенты."""
+    """Transform+Load: витрина = телеметрия JOIN клиенты.
+
+    Полный пересбор (TRUNCATE + INSERT за весь период): демо-данные телеметрии
+    приходят "задним числом" (генератор telemetry-producer.py), поэтому фильтр
+    по yesterday() оставлял бы витрину пустой; при малом объёме полный рефреш
+    проще и идемпотентен (нет дублей). В проде на растущем объёме шаг
+    заменяется инкрементом WHERE toDate(event_time) = yesterday().
+    """
+    ch().execute("TRUNCATE TABLE reports_user_daily")
     ch().execute("""
         INSERT INTO reports_user_daily
         (user_id, day, prosthesis_id, events, avg_response_ms, client_name, client_email)
@@ -108,7 +122,6 @@ def build_datamart(**_):
                           argMax(email, loaded_at) AS email
                    FROM crm_clients_stage GROUP BY user_id) AS c
           ON c.user_id = t.user_id
-        WHERE toDate(t.event_time) = yesterday()
         GROUP BY t.user_id, toDate(t.event_time), t.prosthesis_id
     """)
     n = ch().execute("SELECT count() FROM reports_user_daily")[0][0]

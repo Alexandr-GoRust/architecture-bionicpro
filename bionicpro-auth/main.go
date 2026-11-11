@@ -36,7 +36,8 @@ import (
 )
 
 var (
-	keycloakBase   = env("KEYCLOAK_URL", "http://localhost:8080")
+	keycloakBase   = env("KEYCLOAK_URL", "http://localhost:8080")        // сервер-сервер: discovery, token, JWKS (внутри docker-сети)
+	keycloakPublic = env("KEYCLOAK_PUBLIC_URL", keycloakBase)            // для БРАУЗЕРА: AuthCodeURL и logout (должен резолвиться с хоста)
 	keycloakRealm  = env("KEYCLOAK_REALM", "reports-realm")
 	clientID       = env("AUTH_CLIENT_ID", "bionicpro-auth")
 	clientSecret   = env("AUTH_CLIENT_SECRET", "bionicpro-auth-secret")
@@ -199,16 +200,27 @@ func main() {
 		log.Fatalf("keycloak unreachable: %v", err)
 	}
 
+	// AuthURL — публичный (по нему идёт БРАУЗЕР), TokenURL — внутренний (обмен кода/refresh делает сервис).
+	// Если оба публичны (запуск вне docker) — просто не задавайте KEYCLOAK_URL отдельно.
 	oauthCfg := &oauth2.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
-		Endpoint:     provider.Endpoint(),
-		RedirectURL:  env("AUTH_REDIRECT_URL", "http://localhost:8000/callback"),
-		Scopes:       []string{"openid", "profile", "email", "offline_access"},
+		Endpoint: oauth2.Endpoint{
+			AuthURL:  keycloakPublic + "/realms/" + keycloakRealm + "/protocol/openid-connect/auth",
+			TokenURL: keycloakBase + "/realms/" + keycloakRealm + "/protocol/openid-connect/token",
+		},
+		RedirectURL: env("AUTH_REDIRECT_URL", "http://localhost:8000/callback"),
+		// NB: offline_access в стартовом realm не разрешён клиенту («Offline tokens
+		// not allowed»), а обычный refresh_token выдаётся и без него (Standard Flow).
+		Scopes: []string{"openid", "profile", "email"},
 	}
 
 	store := newSessionStore()
-	idTokenVerifier := provider.Verifier(&oidc.Config{ClientID: clientID})
+	// issuer в id_token формируется по URL, по которому браузер ходил в Keycloak
+	// (публичный localhost:8080), а discovery здесь сделан по внутреннему
+	// keycloak:8080 — проверку iss пропускаем, подпись RS256 всё равно
+	// сверяется с JWKS внутреннего провайдера (ключи одни и те же).
+	idTokenVerifier := provider.Verifier(&oidc.Config{ClientID: clientID, SkipIssuerCheck: true})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
@@ -232,6 +244,7 @@ func main() {
 	})
 
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("callback: state=%s code=%v", r.URL.Query().Get("state"), r.URL.Query().Get("code") != "")
 		state := r.URL.Query().Get("state")
 		verifier, redirect, ok := takeLogin(state)
 		if !ok {
@@ -239,7 +252,8 @@ func main() {
 			return
 		}
 		code := r.URL.Query().Get("code")
-		ctx := r.Context()
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
 		tok, err := oauthCfg.Exchange(ctx, code,
 			oauth2.SetAuthURLParam("code_verifier", verifier))
 		if err != nil {
@@ -247,6 +261,7 @@ func main() {
 			http.Error(w, "token exchange failed", http.StatusBadGateway)
 			return
 		}
+		log.Printf("token exchange ok (access exp=%v)", tok.Expiry)
 		rawID := tok.Extra("id_token")
 		if rawID == nil {
 			http.Error(w, "no id_token", http.StatusBadGateway)
@@ -254,6 +269,7 @@ func main() {
 		}
 		idt, err := idTokenVerifier.Verify(ctx, rawID.(string))
 		if err != nil {
+			log.Printf("id_token verify failed: %v", err)
 			http.Error(w, "invalid id_token", http.StatusBadGateway)
 			return
 		}
@@ -283,10 +299,11 @@ func main() {
 			SameSite: http.SameSiteLaxMode,
 			MaxAge:   int(sessionTTL.Seconds()),
 		})
+		// относительный redirect (/) отправляем на фронтенд, а не в корень сервиса
 		if redirect == "" || !strings.HasPrefix(redirect, "/") {
 			redirect = "/"
 		}
-		http.Redirect(w, r, redirect, http.StatusFound)
+		http.Redirect(w, r, env("FRONTEND_URL", "http://localhost:3000")+redirect, http.StatusFound)
 	})
 
 	mux.HandleFunc("/logout", func(w http.ResponseWriter, r *http.Request) {
@@ -294,7 +311,7 @@ func main() {
 			store.drop(c.Value)
 		}
 		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
-		http.Redirect(w, r, keycloakBase+"/realms/"+keycloakRealm+"/protocol/openid-connect/logout?redirect_uri="+
+		http.Redirect(w, r, keycloakPublic+"/realms/"+keycloakRealm+"/protocol/openid-connect/logout?redirect_uri="+
 			url.QueryEscape(env("FRONTEND_URL", "http://localhost:3000")), http.StatusFound)
 	})
 
@@ -310,10 +327,14 @@ func main() {
 	}))
 
 	// Проксирование к reports-api: сессия -> access_token -> Bearer.
+	// Пользователь не может подменить «чужой» sub: user перезаписывается сервером
+	// из клеймов его access_token (кроме администраторов — им reports-api разрешает всё).
 	mux.HandleFunc("/api/reports", withSession(store, oauthCfg, func(w http.ResponseWriter, r *http.Request, sess *session) {
 		claims, _ := parseUnverifiedClaims(sess.Access)
 		userSub, _ := claims["sub"].(string)
-		apiURL := env("REPORTS_API_URL", "http://localhost:8001") + "/reports?user=" + url.QueryEscape(userSub)
+		q := r.URL.Query()
+		q.Set("user", userSub)
+		apiURL := env("REPORTS_API_URL", "http://localhost:8001") + "/reports?" + q.Encode()
 		req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, apiURL, nil)
 		req.Header.Set("Authorization", "Bearer "+sess.Access)
 		resp, err := http.DefaultClient.Do(req)
@@ -339,7 +360,7 @@ func main() {
 	})
 
 	addr := env("LISTEN", ":8000")
-	log.Printf("bionicpro-auth listening on %s (keycloak=%s realm=%s)", addr, keycloakBase, keycloakRealm)
+	log.Printf("bionicpro-auth listening on %s (keycloak=%s public=%s realm=%s)", addr, keycloakBase, keycloakPublic, keycloakRealm)
 	log.Fatal(http.ListenAndServe(addr, mux))
 }
 

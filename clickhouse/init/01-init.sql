@@ -5,12 +5,18 @@
 -- поэтому CDC-топик потребляется как JSONAsString (сырой JSON), а поля
 -- извлекаются JSONExtract* в MaterializedView (проверено живым прогоном).
 
+-- Сервисный юзер для reports-api и Airflow ETL: доступ только к БД reports
+-- (наименьшие привилегии). Юзер default из docker-сети не пускает
+-- (Authentication failed) — поэтому сервисы подключаются всегда им.
+CREATE USER IF NOT EXISTS reports_api IDENTIFIED BY 'reports_api_pass';
+GRANT CREATE TABLE, INSERT, SELECT, TRUNCATE ON reports.* TO reports_api;
+
 -- Приёмник CDC-топика crm.public.clients
 CREATE TABLE IF NOT EXISTS reports.kafka_crm_clients (raw String)
 ENGINE = Kafka
 SETTINGS kafka_broker_list = 'kafka:9092',
          kafka_topic_list = 'crm.public.clients',
-         kafka_group_name = 'ch_crm_clients_v5',
+         kafka_group_name = 'ch_crm_clients_v6',
          kafka_format = 'JSONAsString',
          kafka_num_consumers = 1,
          kafka_skip_broken_messages = 10;
@@ -44,7 +50,7 @@ CREATE TABLE IF NOT EXISTS reports.kafka_telemetry
 ENGINE = Kafka
 SETTINGS kafka_broker_list = 'kafka:9092',
          kafka_topic_list = 'telemetry.prosthesis',
-         kafka_group_name = 'ch_telemetry_v2',
+         kafka_group_name = 'ch_telemetry_v3',
          kafka_format = 'JSONEachRow',
          kafka_num_consumers = 1,
          kafka_skip_broken_messages = 10;

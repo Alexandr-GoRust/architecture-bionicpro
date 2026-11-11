@@ -34,22 +34,52 @@
 
 ## Запуск
 
+Всё автоматизировано — ручных шагов инициализации больше нет:
+
 ```bash
 docker compose up -d --build
-# Keycloak :8080 (admin/admin), фронтенд :3000, bionicpro-auth :8000,
-# reports-api :8001, Airflow :8081 (admin/admin), Kafka Connect :8083,
-# ClickHouse :8123/:9000, Garage S3 :9010, CDN :8090
-
-# инициализация Garage (после первого старта):
-docker compose exec minio /garage layout assign -z dc1 -c 1G <NODE_ID из garage status>
-docker compose exec minio /garage layout apply --version 1
-docker compose exec minio /garage bucket create reports
-docker compose exec minio /garage key create reports-api   # ключи -> docker-compose env
-docker compose exec minio /garage bucket allow --read --write reports --key reports-api
-
-# телеметрия (7 дней × 40 событий):
-python3 telemetry-producer.py 7 40
 ```
+
+При первом старте сами отрабатывают (см. `e2e_results.txt`):
+
+- `garage-init` — layout/бакет/ключи Garage через Admin API (`garage/init_garage.py`);
+- `debezium-register` — CDC-коннектор (с retry-ожиданием Kafka Connect);
+- `telemetry-seed` — 280 демо-событий телеметрии (витрина не пустая);
+- `clickhouse/init` — юзер `reports_api` + KafkaEngine/MV;
+- Airflow — `db migrate` + `users create` (гарантированный `admin/admin`).
+
+Порты: Keycloak :8080 (admin/admin), фронтенд :3000, bionicpro-auth :8000,
+reports-api :8001, Airflow :8081 (admin/admin), Kafka Connect :8083,
+ClickHouse :8123/:9000, Garage S3 :9010, CDN :8090.
+
+Вход (MFA обязательна, required action CONFIGURE_TOTP): `prothetic1`/`prothetic123`
+(и другие из `keycloak/realm-export.json`), после пароля — настройка OTP
+(Google Authenticator/FreeOTP).
+
+Живой сквозной прогон с чистого старта (вход PKCE + MFA, отчёт, CDN MISS→HIT,
+Airflow, CDC) — скриншоты в `e2e/0*.png`, сценарий `e2e/e2e_playwright.py`
+(playwright), текстовая сводка `e2e_results.txt`.
+
+
+### Фиксы по итогам ревью (2026-11-11)
+
+1. **502 при входе (Задание 1)**: `bionicpro-auth` отдавал браузеру ВНУТРЕННЕЕ
+   docker-имя (`keycloak:8080`) в AuthCodeURL/logout. Разделены
+   `KEYCLOAK_PUBLIC_URL` (браузер: авторизация/logout) и `KEYCLOAK_URL`
+   (сервер-сервер: токены/JWKS); issuer id_token проверяется через JWKS
+   (SkipIssuerCheck — подпись RS256 сверяется полноценно).
+2. **Airflow admin/admin (Задание 2)**: `standalone` не гарантирует учётку —
+   теперь `db migrate` + `airflow users create` при старте сервиса.
+3. **ClickHouse-юзер `reports_api`** создался только в живой сессии — добавлен
+   в `clickhouse/init/01-init.sql` (default из docker-сети не пускает).
+4. **Garage** (S3) после prune оставался без layout/бакета/ключей —
+   автоинициализация сервисом `garage-init` (Admin API v1, идемпотентно,
+   фиксированные ключи = env reports-api).
+5. **Debezium-коннектор** регистрировался раньше готовности Kafka Connect —
+   добавлен retry-цикл (до 3 минут).
+6. Фронтенд ходит в API через свой origin (nginx-прокси `/api/`) — убран
+   кросс-портовый fetch, ломавшийся на CORS; cookie остаётся first-party.
+7. `/api/reports` проксирует исходные `from/to` (ранее терялись).
 
 ## Важные инженерные решения
 

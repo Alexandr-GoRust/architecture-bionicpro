@@ -2,7 +2,10 @@ import React, { useEffect, useState } from 'react';
 
 // Авторизация и отчёты — через bionicpro-auth (порт 8000) с сессионной cookie
 // (credentials: 'include'). Токены фронтенду недоступны по построению.
-const AUTH = process.env.REACT_APP_AUTH_URL || 'http://localhost:8000';
+// Авторизация и API — ЧЕРЕЗ СВОЙ origin (nginx фронтенда проксирует /api/,
+// /login, /callback на bionicpro-auth): сессионная cookie остаётся first-party,
+// кросс-доменных fetch с другим портом нет (иначе CORS рвёт /api/me).
+const AUTH = process.env.REACT_APP_AUTH_URL || '';
 
 interface Me {
   sub: string;

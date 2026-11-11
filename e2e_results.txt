@@ -1,38 +1,38 @@
-== BionicPRO спринт 9: сквозной прогон (2026-11-09, docker compose, 15 сервисов) ==
+Сквозной e2e-прогон (2026-11-11), ПОЛНОСТЬЮ ЧИСТЫЙ старт:
+docker compose down -v --remove-orphans && docker compose up -d --build
+(аналог docker prune контейнеров/вольюмов — как при проверке ревьюером).
 
-0) Токен: OAuth2 (для e2e — password grant сервисного пользователя e2e-test;
-   в браузере пользователь проходит PKCE + OTP). access TTL = 120 c, refresh есть.
-   sub = fc9c230b-ddcd-4d71-a965-5c8964a508b4 (позже удалён из realm, realm чист).
+Автоинициализация при старте (без ручных шагов):
+  garage-init: layout dc1 + бакет reports + ключ reports-api + allow  [exit 0]
+  debezium-register: CDC-коннектор crm-postgres-connector (retry до 8083) [exit 0]
+  telemetry-seed: 280 событий телеметрии за 7 дней в Kafka            [exit 0]
+  clickhouse init: юзер reports_api + KafkaEngine/MV                  [ok]
+  airflow init: migrate + users create (admin/admin)                   [ok]
 
-1) GET /reports (свой отчёт, период 2026-01-01..2026-01-07):
-   {"report_url":"http://localhost:8090/reports-cdn/user=fc9c230b-.../2026-01-01_2026-01-07.json"}
+Задание 1 — SSO/PKCE/MFA (браузер, e2e/e2e_playwright.py, скриншоты e2e/*.png):
+  01 фронт без сессии: только Login
+  02 редирект на Keycloak http://localhost:8080 (ПУБЛИЧНЫЙ URL — фикс ревью:
+     ранее браузер уходил на внутреннее имя контейнера keycloak:8080 → 502)
+  03 обязательная настройка OTP (CONFIGURE_TOTP, код по TOTP из secret)
+  04 сессия установлена: фронт показывает пользователя, токенов во фронте нет
+     (cookie HttpOnly, /api/me через nginx-прокси своего origin)
 
-2) Скачивание через CDN: HTTP 200, X-Cache-Status: EXPIRED (первый) -> HIT (повтор).
+Задание 2 — сервис отчётов:
+  05 отчёт за 2026-01-01..07: report_url = CDN-ссылка (S3 + кеш)
+  06 CDN: первый запрос X-Cache-Status: MISS, повторный: HIT
+  /api/me → 200 (sub из access-токена)
+  период за границей данных → 202 Accepted ("last processed day")
+  Airflow :8081 вход admin/admin (07), DAG reports_user_daily_etl success (08-09)
+  витрина reports_user_daily: 21 строка, 3 пользователя, 2026-01-01..07
 
-3) Отчёт с данными (новый период 2026-01-02..2026-01-06, из S3 через CDN):
-   {"period":{"from":"2026-01-02","to":"2026-01-06"},"rows":[
-     {"date":"2026-01-02","prosthesis_id":"prosthesis-e2e","events":15,"avg_response_ms":67.7},
-     {"date":"2026-01-03","prosthesis_id":"prosthesis-e2e","events":15,"avg_response_ms":66.5},
-     {"date":"2026-01-04","prosthesis_id":"prosthesis-e2e","events":15,"avg_response_ms":70.1}, ...]}
-   Повторный запрос: X-Cache-Status: HIT (раздача из кеша nginx, без S3/ClickHouse).
+Задание 3 — S3/CDN:
+  Garage-ключи импортируются фиксированными (garage-init), отчёт кладётся в S3,
+  nginx-CDN отдаёт с кешем (MISS→HIT живьём)
 
-4) Повторный GET /reports — тот же report_url из S3 (без обращения к ClickHouse).
+Задание 4 — CDC:
+  UPDATE clients в CRM → через секунды в ClickHouse crm_clients:
+  sub-prothetic1 → «Иван Обновлённый (CDC)» (Debezium → Kafka → MV)
 
-5) Чужой sub (sub-prothetic1 под своим токеном): HTTP 403 — доступ только к своему отчёту.
-
-6) Без токена: HTTP 401.
-
-7) Необработанный период (2026-02-01..2026-02-07):
-   202 Accepted: "data for requested period is not processed yet; last processed day: 2026-01-07".
-
-8) CDC (Debezium): UPDATE clients в CRM (PostgreSQL) -> топик crm.public.clients ->
-   KafkaEngine (JSONAsString) -> MV (JSONExtract) -> реплика crm_clients в ClickHouse:
-   sub-prothetic1 = "Prothetic One (updated)", sub-prothetic2 = "Prothetic Two (updated)".
-
-9) Телеметрия: producer -> топик telemetry.prosthesis -> KafkaEngine -> MV ->
-   telemetry_raw = 385 событий; витрина reports_user_daily = 28 строк (3 пользователя + e2e).
-
-10) Airflow: DAG reports_user_daily_etl загружен (расписание 0 3 * * *), UI :8081.
-
-11) Garage S3 (замена MinIO, удалённого из Docker Hub в сент. 2026): бакет reports,
-    ключ GK78bf849c...; объекты user=<sub>/<from>_<to>.json.
+Ответы API нештатным запросам:
+  без сессии/токена → 401; период за границей обработанного → 202
+  запрошенный user != sub из токена → 403 (кроме administrator)

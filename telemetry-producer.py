@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Демо-генератор телеметрии: чипы протезов -> Kafka топик telemetry.prosthesis.
 Эмулирует поток с 4G-модулей (Задание 2/4: данные для витрины отчётов)."""
-import json, random, time, datetime, sys
+import json, random, time, datetime, sys, os
 from kafka import KafkaProducer
 
 producer = KafkaProducer(
-    bootstrap_servers="localhost:29092",  # EXTERNAL listener; внутри docker-сети сервисы ходят на kafka:9092
+    # по умолчанию — EXTERNAL listener с хоста; внутри docker-сети задать kafka:9092
+    bootstrap_servers=os.environ.get("KAFKA_BOOTSTRAP", "localhost:29092"),
     value_serializer=lambda v: json.dumps(v).encode(),
 )
 users = ["sub-prothetic1", "sub-prothetic2", "sub-prothetic3"]
